@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+
+# Function to display help
+show_help() {
+  echo "Usage: $0 [options] <YouTube URL>"
+  echo
+  echo "Options:"
+  echo "  -o, --output <directory>  Specify the output directory for downloaded files."
+  echo "  -h, --help                 Show this help message."
+  echo
+  echo "Example:"
+  echo "  $0 -o /path/to/directory https://www.youtube.com/watch?v=example"
+}
+
+# Function to validate YouTube URL format
+validate_youtube_url() {
+  local url="$1"
+  if [[ ! "$url" =~ ^(https?://)?(www\.)?(youtube\.com/watch\?v=|youtu\.be/)[a-zA-Z0-9_-]+ ]]; then
+    echo "Invalid YouTube URL."
+    return 1
+  else
+    return 0
+  fi
+}
+
+# Function to extract video ID from YouTube URL
+extract_video_id() {
+  local url="$1"
+  if [[ "$url" =~ youtube\.com/watch\?v=([a-zA-Z0-9_-]+) ]]; then
+    echo "${BASH_REMATCH[1]}"
+  elif [[ "$url" =~ youtu\.be/([a-zA-Z0-9_-]+) ]]; then
+    echo "${BASH_REMATCH[1]}"
+  else
+    echo "" # Return empty string if no ID is found
+  fi
+}
+
+# Function to convert bytes to human readable format
+format_size() {
+    local bytes=$1
+    if [[ -z "$bytes" || "$bytes" == "null" ]]; then
+        echo "unknown size"
+        return
+    fi
+    # Convert to integer
+    bytes=$(printf "%.0f" "$bytes")
+    if ((bytes < 1024)); then
+        echo "${bytes}B"
+    elif ((bytes < 1048576)); then
+        echo "$((bytes / 1024))KB"
+    else
+        echo "$((bytes / 1048576))MB"
+    fi
+}
+
+# Function to format video/audio codec info
+format_codec() {
+    local codec=$1
+    if [[ "$codec" == "none" ]]; then
+        echo "No"
+    else
+        echo "Yes ($codec)"
+    fi
+}
+
+# Default output directory
+OUTPUT_DIR="$(pwd)/youtube-downloaded"
+
+# ANSI color codes
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m' # No Color
+
+# Function to draw a box around text
+draw_container_box() {
+    local text="$1"
+    local width=$((${#text} + 4))
+    
+    echo -e "╭$(printf '─%.0s' $(seq 1 $width))╮"
+    echo -e "│  ${BLUE}${BOLD}$text${NC}  │"
+    echo -e "╰$(printf '─%.0s' $(seq 1 $width))╯"
+}
+
+# Parse command line arguments
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    -o|--output)
+      OUTPUT_DIR="$2"
+      shift 2
+      ;;
+    -h|--help)
+      show_help
+      exit 0
+      ;;
+    *)
+      youtube_url="$1"
+      shift
+      ;;
+  esac
+done
+
+# Create output directory if it doesn't exist
+mkdir -p "$OUTPUT_DIR"
+
+# Check if YouTube URL is provided
+if [[ -z "$youtube_url" ]]; then
+  read -p "Enter YouTube URL: " youtube_url
+fi
+
+# Validate the URL
+if ! validate_youtube_url "$youtube_url"; then
+  exit 1
+fi
+
+# Extract video ID
+video_id=$(extract_video_id "$youtube_url")
+if [ -z "$video_id" ]; then
+  echo "Could not extract video ID."
+  exit 1
+fi
+
+# List available formats using yt-dlp and jq, sort by container type and size
+formats=$(yt-dlp --cookies-from-browser chrome -j "https://www.youtube.com/watch?v=$video_id" 2>/dev/null | \
+         jq -r '.formats | sort_by(.ext, if .filesize_approx == null then 0 else .filesize_approx end) | reverse | .[] | "\(.format_id)\t\(.format_note // "")\t\(.vcodec)\t\(.acodec)\t\(.ext)\t\(.filesize_approx // "")\t\(.fps // "")\t\(.tbr // "")\t\(.language // "")"')
+
+if [ -z "$formats" ]; then
+    echo "Failed to retrieve video formats. Please make sure:"
+    echo "1. yt-dlp and jq are installed"
+    echo "2. You are logged into YouTube in Chrome"
+    echo "3. The video URL is valid and accessible"
+    exit 1
+fi
+
+echo "Available formats:"
+echo "========================================="
+
+# Display formats grouped by container
+declare -a format_ids
+current_container=""
+i=1
+
+while IFS=$'\t' read -r format_id note vcodec acodec ext size fps bitrate lang; do
+    # If container type changes, print header
+    if [ "$current_container" != "$ext" ]; then
+        current_container="$ext"
+        echo
+        draw_container_box "${ext:+$(echo "$ext" | tr '[:lower:]' '[:upper:]')}"
+        echo -e "${CYAN}$(printf '─%.0s' $(seq 1 50))${NC}"
+    fi
+    
+    # Store format ID for later use
+    format_ids[$i]="$format_id"
+    
+    # Format the size to be human readable
+    human_size=$(format_size "$size")
+    
+    # Format video/audio codec info
+    has_video=$(format_codec "$vcodec")
+    has_audio=$(format_codec "$acodec")
+    
+    # Display the format details
+    echo "[$i] Format Details:"
+    echo "    Resolution/Quality: ${note:-"N/A"}"
+    echo "    Video: $has_video"
+    echo "    Audio: $has_audio"
+    echo "    File Size: $human_size"
+    [ -n "$fps" ] && [ "$fps" != "null" ] && echo "    Frame Rate: ${fps}fps"
+    [ -n "$bitrate" ] && [ "$bitrate" != "null" ] && echo "    Bitrate: ${bitrate}Kbps"
+    [ -n "$lang" ] && [ "$lang" != "null" ] && echo "    Language: $lang"
+    echo -e "${CYAN}$(printf '─%.0s' $(seq 1 50))${NC}"
+    
+    i=$((i+1))
+done <<< "$formats"
+
+# Prompt user for selection
+read -p "Enter the number of the format to download: " selection
+
+# Validate user input
+if ! [[ "$selection" =~ ^[0-9]+$ ]]; then
+  echo "Invalid input. Please enter a number."
+  exit 1
+fi
+
+if [ "$selection" -lt 1 ] || [ "$selection" -gt $((i-1)) ]; then
+  echo "Invalid selection. Number out of range."
+  exit 1
+fi
+
+# Download the selected format using yt-dlp
+selected_format_id="${format_ids[$selection]}"
+yt-dlp --cookies-from-browser chrome -f "$selected_format_id" -o "$OUTPUT_DIR/%(title)s.%(ext)s" "https://www.youtube.com/watch?v=$video_id"
+
+echo "Download complete. File saved in: $OUTPUT_DIR"
+
+exit 0
